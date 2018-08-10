@@ -1,0 +1,668 @@
+<html>
+	<head>
+    <meta charset="utf-8">
+    <script type="text/javascript" src="./../static/js/threejs/three.min.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/controls/OrbitControls.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/controls/PointerLockControls.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/controls/ThirdPersonControl.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/controls/FirstPersonControls.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/loaders/LoaderSupport.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/loaders/FBXLoader.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/loaders/TGALoader.js"></script>
+    <!-- <script type="text/javascript" src="./../static/js/threejs/loaders/OBJLoader.js"></script> -->
+    <!-- <script type="text/javascript" src="./../static/js/threejs/loaders/OBJLoader2.js"></script> -->
+    <!-- <script type="text/javascript" src="./../static/js/threejs/loaders/MTLLoader.js"></script> -->
+    <!-- <script type="text/javascript" src="./../static/js/threejs/GPUParticleSystem.js"></script> -->
+    <script type="text/javascript" src="./../static/js/threejs/libs/inflate.min.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/libs/stats.min.js"></script>
+    <script type="text/javascript" src="./../static/js/threejs/libs/dat.gui.min.js"></script>
+    <script type="text/javascript" src="./../static/js/socket.io.js"></script>
+	</head>
+	<style lang="scss" scoped>
+		body{
+			padding: 0px;
+			margin: 0px;
+		}
+	</style>
+	<body>
+		<div id="test">
+			
+    </div>
+    <script type="x-shader/x-vertex" id="vertexShader">
+      varying vec3 vWorldPosition;
+      void main() {
+        vec4 worldPosition = modelMatrix * vec4( position, 1.0 );
+        vWorldPosition = worldPosition.xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+      }
+    </script>
+  
+    <script type="x-shader/x-fragment" id="fragmentShader">
+      uniform vec3 topColor;
+      uniform vec3 bottomColor;
+      uniform float offset;
+      uniform float exponent;
+      varying vec3 vWorldPosition;
+      void main() {
+        float h = normalize( vWorldPosition + offset ).y;
+        gl_FragColor = vec4( mix( bottomColor, topColor, max( pow( max( h , 0.0), exponent ), 0.0 ) ), 1.0 );
+      }
+    </script>
+	</body>
+<script>
+const app ={
+  controls: null,
+  container: document.querySelector("#test"),
+  renderer: null,
+  scene: null,
+  stats: null,
+  camera: null,
+  cameraPosi: {
+    x: 0,
+    y: 500,
+    z: -500
+  },
+  clock: null,
+  directionalLight: null,
+  pointLight: null,
+  hemiLight: null,
+  gui: null,
+  path_fbx: {
+    idle: './../static/model/bot/Idle.fbx',
+    run: './../static/model/bot/Running.fbx',
+    leftRun: './../static/model/bot/Left Strafe.fbx',
+    rightRun: './../static/model/bot/Right Strafe.fbx',
+    backwards: './../static/model/bot/Jog Backward.fbx',
+    jump: './../static/model/bot/Jump.fbx'
+  },
+  userModel: null,
+  userObject: null,
+  mixers: [],
+  socket: null,
+  socket_id: null,
+  user:{},
+  freshTime: 0,
+  //action
+  actionNow: "idle",
+  
+  //移动相关的变量
+  controlsEnabled: false,
+  moveForward: false,
+  moveBackward: false,
+  moveLeft: false,
+  moveRight: false,
+  jump: false,
+  spaceUp: true,
+  gravityAcc: 9.8 * 200,
+  count:0,
+  timePer60:0,
+  
+  velocity: new THREE.Vector3(), //移动速度变量
+  direction: new THREE.Vector3(), //移动的方向变量
+  speed: 20000, //控制器移动速度
+  upSpeed: 1000, //控制跳起时的速度
+
+  //声明射线
+  upRaycaster: new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3( 0, 1, 0), 0, 10),
+  horizontalRaycaster: new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(), 0, 40),
+  downRaycaster: new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3( 0, -1, 0), 0, 10),
+  rayObject: null,
+
+  run(){
+    const self  = this;
+    this.init();
+    this.initPointerLock();
+    this.animate();
+    this.initControls();
+    this.randomObject();
+    // this.connection();
+    this.loadFBXObj(this.path_fbx.idle).then(object => {
+      this.userModel = object;
+      // this.userObject = this.userModel.clone();
+      this.userObject = this.userModel;
+      this.userObject.mixer = new THREE.AnimationMixer( this.userObject );
+      this.mixers.push( this.userObject.mixer );
+      if(object.animations[ 0 ]){
+        var action = this.userObject.mixer.clipAction( object.animations[ 0 ] );
+        this.userObject.actions = {
+          idle: action
+        };
+        action.play();
+      }
+      this.userObject.traverse( function ( child ) {
+        if ( child.isMesh ) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      } );
+      this.camera.position.y = this.cameraPosi.y;
+      this.camera.position.x = this.cameraPosi.x;
+      this.camera.position.z = this.cameraPosi.z;
+      this.controls = new THREE.ThirdPersonControl(this.camera, this.userObject, this.renderer.domElement);
+      this.scene.add(this.userObject);
+      this.rayObject = new THREE.ArrowHelper(this.userObject.getWorldDirection(new THREE.Vector3()), this.userObject.getWorldPosition(new THREE.Vector3()), 300, 0xffff00);
+      this.rayObject.position.y = 50;
+      this.rayObject.visible = false;
+      this.scene.add(this.rayObject);
+      this.userObject.rotation.y = Math.PI;
+      this.userObject.position.y = 2;
+      Object.keys(this.path_fbx).forEach(name => {
+        if(name == "idle") return false;
+        this.loadFBXObj(this.path_fbx[name]).then(object => {
+          if(object.animations[ 0 ]){
+            let timeScale = 1;
+            object.animations[ 0 ].tracks[0].values.forEach((i, index) => {
+              if((index+1)%3 == 0 || index%3 == 0){
+                object.animations[ 0 ].tracks[0].values[index] =0.5;
+              }
+            });
+            if(name == "jump"){
+              // let maxHeight = Math.max(...object.animations[ 0 ].tracks[0].values);
+              object.animations[ 0 ].tracks[0].values.forEach((i, index) => {
+                if((index+2)%3 == 0){
+                  // let temp = object.animations[ 0 ].tracks[0].values[index];
+                  object.animations[ 0 ].tracks[0].values[index] = 90;
+                }
+              });
+              let t = this.upSpeed / this.gravityAcc *2;
+              timeScale = object.animations[0].duration / t;
+            }
+            var action = this.userObject.mixer.clipAction( object.animations[ 0 ] );
+            action.timeScale = timeScale;
+            if(name == "jump"){
+              this.userObject.mixer.addEventListener( 'loop', function( e ) {
+                self.jump = false;
+                console.log(e);
+              } );
+            }
+            this.userObject.actions[name] = action;
+          }
+        });
+      })
+    });
+  },
+  init(){
+    this.clock = new THREE.Clock();
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color().setHSL( 0.6, 0, 1 );
+		this.scene.fog = new THREE.Fog( this.scene.background, 1, 5000 );
+    // this.scene.background = new THREE.Color( 0x000000 );
+    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+    // var helper = new THREE.CameraHelper( this.camera );
+    // this.scene.add( helper );
+
+    this.cameraWorld = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+    this.cameraWorld.position.set( 400, 1000, 500 );
+    var controls = new THREE.OrbitControls( this.cameraWorld );
+    controls.target.set(0, 0, 0);
+    controls.update();
+    
+    // var axesHelper = new THREE.AxesHelper( 1000 );
+    // this.scene.add( axesHelper );
+
+    this.addLight();
+    this.addground();
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true
+    });
+    this.renderer.physicallyCorrectLights = true;
+    this.renderer.gammaInput = true;
+    this.renderer.gammaOutput = true;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.toneMapping = THREE.ReinhardToneMapping;
+    this.renderer.toneMappingExposure = 1;
+    // this.renderer.shadowMap.soft = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap; // default THREE.PCFShadowMap
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.container.appendChild(this.renderer.domElement);
+    this.stats = new Stats();
+    this.container.appendChild(this.stats.dom);
+    window.addEventListener( 'resize', this.onWindowResize, false );
+    // this.renderer.domElement.addEventListener( 'mousewheel', this.mousewheel, false );
+
+    // SKYDOME
+    var vertexShader = document.getElementById( 'vertexShader' ).textContent;
+    var fragmentShader = document.getElementById( 'fragmentShader' ).textContent;
+    var uniforms = {
+      topColor:    { value: new THREE.Color( 0x0077ff ) },
+      bottomColor: { value: new THREE.Color( 0xffffff ) },
+      offset:      { value: 33 },
+      exponent:    { value: 0.6 }
+    };
+    uniforms.topColor.value.copy( this.hemiLight.color );
+    this.scene.fog.color.copy( uniforms.bottomColor.value );
+    var skyGeo = new THREE.SphereBufferGeometry( 4000, 32, 15 );
+    var skyMat = new THREE.ShaderMaterial( { vertexShader: vertexShader, fragmentShader: fragmentShader, uniforms: uniforms, side: THREE.BackSide } );
+    var sky = new THREE.Mesh( skyGeo, skyMat );
+    this.scene.add( sky );
+  },
+  loadFBXObj(path){
+    var self = this
+    return new Promise((resolve, reject) => {
+
+      var fbx_loader = new THREE.FBXLoader();
+      fbx_loader.load(path, (object) => {
+        // object.scale.multiplyScalar(0.02);    // 缩放模型大小
+        resolve(object);
+      }, onProgress, onError);
+    })
+    function onProgress(pro){
+      console.log(`loading: ${(pro.loaded/pro.total*100).toFixed(2)}%`);
+    };
+    function onError(e){
+      console.error(e);
+    }
+  },
+  loadObj(path){
+    function onProgress(pro){
+      // console.log(pro);
+      console.log(`loading: ${(pro.loaded/pro.total*100).toFixed(2)}%`);
+    };
+    function onError(e){
+      console.error(e);
+    }
+    return new Promise((resolve, reject) => {
+      var self = this;
+      var objLoader = new THREE.OBJLoader();
+      objLoader.load(path, (loadedMesh) => {
+        // console.log(loadedMesh);
+        // loadedMesh.castShadow = true;
+        // event.detail.loaderRootNode.position.y = 100;
+        // event.detail.loaderRootNode.scale.multiplyScalar(0.0002);    // 缩放模型大小
+        resolve(loadedMesh);
+        // scene.add(loadedMesh);
+      }, onProgress, onError);
+    })
+  },
+  addLight(){
+    const light = new THREE.AmbientLight(0x909090);
+    this.scene.add( light );
+    
+    this.pointLight = new THREE.PointLight( 0xffee88, 1, 1000000, 2);
+    var bulbGeometry = new THREE.SphereBufferGeometry( 6, 200, 200 );
+    var bulbMat = new THREE.MeshStandardMaterial( {
+      emissive: 0xffffee,
+      emissiveIntensity: this.pointLight.intensity / Math.pow( 0.02, 2.0 ),
+      color: 0x000000
+    });
+    this.pointLight.add( new THREE.Mesh( bulbGeometry, bulbMat ) );
+    this.pointLight.position.set( 0, 600, 600 );
+    this.pointLight.castShadow = true; 
+    this.pointLight.shadowMapVisible = true;
+    this.pointLight.shadow.camera.far = 10000;
+    
+    this.pointLight.power = 10000000;
+    var ch = new THREE.CameraHelper( this.pointLight.shadow.camera );
+    // this.scene.add(ch);
+    // this.scene.add( this.pointLight );
+    
+    this.hemiLight = new THREE.HemisphereLight( 0xffffff, 0xffffff, 0.6 );
+    this.hemiLight.color.setHSL( 0.6, 1, 0.6 );
+    this.hemiLight.groundColor.setHSL( 0.095, 1, 0.75 );
+    this.hemiLight.position.set( 0, 1000, 0 );
+    this.scene.add( this.hemiLight );
+    const hemiLightHelper = new THREE.HemisphereLightHelper( this.hemiLight, 10 );
+    // this.scene.add( hemiLightHelper );
+
+    this.directionalLight = new THREE.DirectionalLight(0xffffff, 1, 10000, true);
+    this.directionalLight.position.set(1000, 1000, 1000);
+    this.directionalLight.castShadow = true;
+    this.directionalLight.shadow.camera.far = 3000;
+    this.directionalLight.shadow.camera.top = 10000;
+    this.directionalLight.shadow.camera.bottom = -10000;
+    this.directionalLight.shadow.camera.left = -10000;
+    this.directionalLight.shadow.camera.right = 10000;
+    this.directionalLight.shadow.mapSize.width = 2048;
+		this.directionalLight.shadow.mapSize.height = 2048;
+    var ch = new THREE.CameraHelper( this.directionalLight.shadow.camera );
+    // this.scene.add(ch);
+    // this.scene.add(this.directionalLight);
+  },
+  addground(){
+    var groundGeo = new THREE.PlaneBufferGeometry( 10000, 10000 );
+    var groundMat = new THREE.MeshPhongMaterial( { color: 0xffffff, specular: 0x050505 } );
+    groundMat.color.setHSL( 0.095, 1, 0.75 );
+    var ground = new THREE.Mesh( groundGeo, groundMat );
+    ground.rotation.x = -Math.PI/2;
+    ground.position.y = -1;
+    this.scene.add( ground );
+    ground.receiveShadow = true;
+  },
+  render() {
+    this.renderer.render( this.scene, this.cameraWorld );
+    this.renderer.render( this.scene, this.camera );
+  },
+  animate() {
+    app.render();
+    var delta = app.clock.getDelta();
+    app.timePer60+=delta;
+    app.count++;
+    if(app.count ==60){
+      console.log(app.timePer60);
+      app.count = 0;
+      app.timePer60 = 0;
+    }
+    // var delta = 1 / 60;
+    var time = Date.now() * 0.0005;
+    if ( app.controlsEnabled === true ) {
+      app.actionCheck();
+      app.velocity.x = 0;
+      app.velocity.z = 0;
+      app.velocity.y -=  app.gravityAcc * delta; // 默认下降的速度
+      //获取当前按键的方向并获取朝哪个方向移动
+      app.direction.z = Number( app.moveForward ) - Number( app.moveBackward );
+      app.direction.x = Number( app.moveLeft ) - Number( app.moveRight );
+      //将法向量的值归一化
+      app.direction.normalize();
+      const rotation = new THREE.Vector3();
+      rotation.copy(app.userObject.getWorldDirection(new THREE.Vector3()));
+
+      var m = new THREE.Matrix4();
+      if(app.direction.z > 0){
+        if(app.direction.x > 0){
+          m.makeRotationY(Math.PI/4);
+        }else if(app.direction.x < 0){
+          m.makeRotationY(-Math.PI/4);
+        }else{
+          m.makeRotationY(0);
+        }
+      }else if(app.direction.z < 0){
+        if(app.direction.x > 0){
+          m.makeRotationY(Math.PI/4*3);
+        }else if(app.direction.x < 0){
+          m.makeRotationY(-Math.PI/4*3);
+        }else{
+          m.makeRotationY(Math.PI);
+        }
+      }else{
+        if(app.direction.x > 0){
+          m.makeRotationY(Math.PI/2);
+        }else if(app.direction.x < 0){
+          m.makeRotationY(-Math.PI/2);
+        }
+      }
+
+      //给向量使用变换矩阵
+      rotation.applyMatrix4(m);
+      app.horizontalRaycaster.set( app.userObject.position , rotation );
+      let downV = new THREE.Vector3().copy(app.userObject.position);
+      downV.y -= 100;
+      // app.downRaycaster.set( app.userObject.position, downV );
+      app.downRaycaster.ray.origin.copy(app.userObject.position);
+      app.rayObject.position.x = app.userObject.position.x;
+      app.rayObject.position.z = app.userObject.position.z;
+      app.rayObject.setDirection(downV);
+
+      //碰撞检测
+      var horizontalIntersections = app.horizontalRaycaster.intersectObjects( app.scene.children, true );
+      var horOnObject = false;
+      horizontalIntersections.every(i => {
+        if(i.object.type == "Mesh" || i.object.type == "Group"){
+          horOnObject = true;
+          return false;
+        }
+        return true;
+      });
+      if(!horOnObject){
+        if ( app.moveForward || app.moveBackward ) app.velocity.z = app.direction.z * app.speed * delta;
+        if ( app.moveLeft || app.moveRight ) app.velocity.x = app.direction.x * app.speed * delta;
+      }
+      var downIntersections = app.downRaycaster.intersectObjects( app.scene.children, true );
+      var onObject = false;
+      downIntersections.every(i => {
+        if(i.object.type == "Mesh" || i.object.type == "Group"){
+          onObject = true;
+          return false;
+        }
+        return true;
+      });
+      if(onObject){
+        app.velocity.y = Math.max( 0, app.velocity.y );
+      }
+      // console.log(app.velocity.y);
+      //根据速度值移动控制器
+      app.userObject.translateX( app.velocity.x * delta);
+      app.userObject.translateZ( app.velocity.z * delta );
+      app.userObject.translateY( app.velocity.y * delta );
+
+      if ( app.userObject.position.y < 1 ) {
+        app.velocity.y = 0;
+        app.userObject.position.y = 1;
+      }
+      app.freshTime += delta;
+      if(app.socket && app.freshTime >= delta){
+        app.freshTime = 0;
+        app.socket.emit('user position', control.position);
+      }
+    }
+    if ( app.mixers.length > 0 ) {
+      for ( var i = 0; i < app.mixers.length; i ++ ) {
+        app.mixers[ i ].update( delta );
+      }
+    }
+    app.stats.update();
+    requestAnimationFrame( arguments.callee );
+  },
+  actionCheck(){
+    let flag = app.moveForward?"1":"0";
+    flag += app.moveBackward?"1":"0";
+    flag += app.moveLeft?"1":"0";
+    flag += app.moveRight?"1":"0";
+    flag += app.jump?"1":"0";
+    if( flag == "00000" && app.actionNow != "idle" ) {
+      app.actionNow = "idle";
+      Object.values(app.userObject.actions).forEach(i => i.stop())
+      app.userObject.actions.idle.play();
+    }
+    if( flag == "10000" && app.actionNow != "run") {
+      app.actionNow = "run";
+      Object.values(app.userObject.actions).forEach(i => i.stop())
+      app.userObject.actions.run.play();
+    }
+    if( flag == "01000" && app.actionNow != "backwards") {
+      app.actionNow = "backwards";
+      Object.values(app.userObject.actions).forEach(i => i.stop())
+      app.userObject.actions.backwards.play();
+    }
+    if( flag == "00100" && app.actionNow != "leftRun") {
+      app.actionNow = "leftRun";
+      Object.values(app.userObject.actions).forEach(i => i.stop())
+      app.userObject.actions.leftRun.play();
+    }
+    if( flag == "00010" && app.actionNow != "rightRun") {
+      app.actionNow = "rightRun";
+      Object.values(app.userObject.actions).forEach(i => i.stop())
+      app.userObject.actions.rightRun.play();
+    }
+    if( app.jump && app.actionNow != "jump"){
+      app.actionNow = "jump";
+      Object.values(app.userObject.actions).forEach(i => i.stop())
+      // app.userObject.actions.jump.setLoop(THREE.LoopOnce)
+      app.userObject.actions.jump.play();
+    }
+  },
+  onWindowResize() {
+    app.camera.aspect = window.innerWidth / window.innerHeight;
+    app.camera.updateProjectionMatrix();
+    app.renderer.setSize( window.innerWidth, window.innerHeight );
+  },
+  initPointerLock() {
+    const self = this;
+    //实现鼠标锁定的教程地址 http://www.html5rocks.com/en/tutorials/pointerlock/intro/
+    var havePointerLock = 'pointerLockElement' in document || 'mozPointerLockElement' in document || 'webkitPointerLockElement' in document;
+    if ( havePointerLock ) {
+      var element = self.renderer.domElement;
+        var pointerlockchange = function ( event ) {
+            if ( document.pointerLockElement === element || document.mozPointerLockElement === element || document.webkitPointerLockElement === element ) {
+                self.controlsEnabled = true;
+            } else {
+                self.controls.enabled = false;
+                // instructions.style.display = '';
+            }
+        };
+        var pointerlockerror = function ( event ) {
+            // instructions.style.display = '';
+        };
+        // 监听变动事件
+        document.addEventListener( 'pointerlockchange', pointerlockchange, false );
+        document.addEventListener( 'mozpointerlockchange', pointerlockchange, false );
+        document.addEventListener( 'webkitpointerlockchange', pointerlockchange, false );
+        document.addEventListener( 'pointerlockerror', pointerlockerror, false );
+        document.addEventListener( 'mozpointerlockerror', pointerlockerror, false );
+        document.addEventListener( 'webkitpointerlockerror', pointerlockerror, false );
+        self.container.addEventListener( 'click', function ( event ) {
+            // instructions.style.display = 'none';
+            //全屏
+            // launchFullScreen(renderer.domElement);
+            // 锁定鼠标光标
+            self.controls.enabled = true;
+            element.requestPointerLock = element.requestPointerLock || element.mozRequestPointerLock || element.webkitRequestPointerLock;
+            element.requestPointerLock();
+        }, false );
+    }
+    else {
+        // instructions.innerHTML = '你的浏览器不支持相关操作，请更换浏览器';
+    }
+  },
+  initControls() {
+    const self = this;
+    var onKeyDown = function ( event ) {
+      // console.log("keydown");
+      switch ( event.keyCode ) {
+        case 38: // up
+        case 87: // w
+          self.moveForward = true;
+          break;
+        case 37: // left
+        case 65: // a
+          self.moveLeft = true;  
+          break;
+        case 40: // down
+        case 83: // s
+          self.moveBackward = true;
+          break;
+        case 39: // right
+        case 68: // d
+          self.moveRight = true;
+          break;
+        case 32: // space
+          // if ( self.canJump && self.spaceUp ) self.velocity.y += self.upSpeed;
+          // self.canJump = false;
+          if ( !self.jump && self.spaceUp ) self.velocity.y = self.upSpeed;
+          self.spaceUp = false;
+          self.jump = true;
+          break;
+      }
+    };
+    var onKeyUp = function ( event ) {
+        switch( event.keyCode ) {
+            case 38: // up
+            case 87: // w
+                self.moveForward = false;    
+                break;
+            case 37: // left
+            case 65: // a
+                self.moveLeft = false;       
+                break;
+            case 40: // down
+            case 83: // s
+                self.moveBackward = false;      
+                break;
+            case 39: // right
+            case 68: // d
+                self.moveRight = false;    
+                break;
+            case 32: // space
+                self.spaceUp = true;    
+                break;
+        }
+    };
+    document.addEventListener( 'keydown', onKeyDown, false );
+    document.addEventListener( 'keyup', onKeyUp, false );
+  },
+  //点纹理
+  generateSprite() {
+
+    var canvas = document.createElement('canvas');
+    canvas.width = 16;
+    canvas.height = 16;
+
+    var context = canvas.getContext('2d');
+    var gradient = context.createRadialGradient(canvas.width / 2, canvas.height / 2, 0, canvas.width / 2, canvas.height / 2, canvas.width / 2);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.2, 'rgba(0,255,255,1)');
+    gradient.addColorStop(0.4, 'rgba(0,0,64,1)');
+    gradient.addColorStop(1, 'rgba(0,0,0,1)');
+
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    var texture = new THREE.Texture(canvas);
+    texture.needsUpdate = true;
+    return texture;
+
+  },
+  connection(){
+    const self  = this;
+    this.socket = io();
+    this.socket.on('init', function(id){
+      // console.log(id);
+      self.socket_id = id;
+      const player = self.createUserObject();
+      self.controls.getObject().add(player);
+      self.user[id] = player;
+    });
+    this.socket.on('update user position', function(msg){
+      Object.keys(msg).forEach(id => {
+        if(id == self.socket_id) return false;
+        let player = self.user[id];
+        if(!player){
+          player = self.createUserObject();
+          self.user[id] = player;
+          self.scene.add(player);
+        }
+        // console.log(player);
+        player.position.x = msg[id].x;
+        player.position.y = msg[id].y;
+        player.position.z = msg[id].z;
+      })
+    });
+  },
+  createUserObject(){
+    // var geometry = new THREE.BoxBufferGeometry( 10, 10, 10 );
+    // var material = new THREE.MeshBasicMaterial( {color: new THREE.Color(Math.random(), Math.random(), Math.random())} );
+    // var cube = new THREE.Mesh( geometry, material );
+    // return cube;
+    return this.userModel.clone();
+  },
+  randomObject(){
+    var geometry = new THREE.BoxBufferGeometry( 10, 1000, 10 );
+    var material = new THREE.MeshPhongMaterial( {color: new THREE.Color(Math.random(), Math.random(), Math.random()), specular: 0x050505} );
+    var a = new THREE.Mesh( geometry, material );
+    a.castShadow = true;
+    a.receiveShadow = true;
+    // this.scene.add( a );
+    for(let i = 0; i < 30; i++){
+      let cube = this.createCube();
+      cube.position.y = 5;
+      cube.position.x = Math.random()>0.5 ? Math.random() * 5000 : -Math.random() * 5000;
+      cube.position.z = Math.random()>0.5 ? Math.random() * 5000 : -Math.random() * 5000;
+      this.scene.add(cube);
+    }
+  },
+  createCube(){
+    var geometry = new THREE.BoxBufferGeometry( 100, 300, 100 );
+    var material = new THREE.MeshBasicMaterial( {color: new THREE.Color(Math.random(), Math.random(), Math.random())} );
+    var cube = new THREE.Mesh( geometry, material );
+    cube.castShadow = true;
+    cube.receiveShadow = true;
+    return cube;
+  }
+}
+window.onload = function(){
+  window.THREE.Loader.Handlers.add(/.tga$/i, new THREE.TGALoader());
+  app.run();
+}
+    
+</script>
+</html>
